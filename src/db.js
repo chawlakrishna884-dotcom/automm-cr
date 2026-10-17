@@ -1,15 +1,62 @@
-import pg from 'pg';
-const { Pool } = pg;
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false } });
-export async function initDb() {
-  await pool.query(`CREATE TABLE IF NOT EXISTS crypto_trades (
-    id BIGSERIAL PRIMARY KEY, guild_id TEXT NOT NULL, channel_id TEXT, buyer_id TEXT NOT NULL, seller_id TEXT NOT NULL,
-    currency TEXT NOT NULL DEFAULT 'LTC', amount_display TEXT NOT NULL, item_description TEXT NOT NULL,
-    invoice_id TEXT UNIQUE NOT NULL, payment_url TEXT, payment_address TEXT, payment_txid TEXT,
-    status TEXT NOT NULL DEFAULT 'awaiting_payment', expires_at TIMESTAMPTZ, dispute_reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  )`);
+const trades = new Map();
+let nextId = 1;
+
+function clone(trade) {
+  return trade ? { ...trade } : null;
 }
-export async function getTrade(id, guildId) { const r = await pool.query('SELECT * FROM crypto_trades WHERE id=$1 AND guild_id=$2', [id, guildId]); return r.rows[0]; }
-export async function getByInvoice(invoiceId) { const r = await pool.query('SELECT * FROM crypto_trades WHERE invoice_id=$1', [invoiceId]); return r.rows[0]; }
-export async function updateTrade(id, fields) { const entries = Object.entries(fields); const values = entries.map(([,v])=>v); const sets = entries.map(([k],i)=>`${k}=$${i+1}`); values.push(id); await pool.query(`UPDATE crypto_trades SET ${sets.join(',')}, updated_at=NOW() WHERE id=$${values.length}`, values); }
+
+export const pool = {
+  async query(_sql, values = []) {
+    const [guildId, buyerId, sellerId, amountDisplay, itemDescription, invoiceId] = values;
+    const now = new Date();
+    const trade = {
+      id: nextId++,
+      guild_id: guildId,
+      buyer_id: buyerId,
+      seller_id: sellerId,
+      amount_display: amountDisplay,
+      item_description: itemDescription,
+      invoice_id: invoiceId,
+      status: 'awaiting_payment',
+      payment_url: null,
+      payment_address: null,
+      payment_txid: null,
+      channel_id: null,
+      dispute_reason: null,
+      expires_at: null,
+      created_at: now,
+      updated_at: now
+    };
+
+    trades.set(trade.id, trade);
+    return { rows: [clone(trade)] };
+  }
+};
+
+export async function initDb() {
+  console.log('Using temporary in-memory storage; no DATABASE_URL required.');
+}
+
+export async function getTrade(id, guildId) {
+  const trade = trades.get(Number(id));
+  if (!trade || (guildId && trade.guild_id !== guildId)) return null;
+  return clone(trade);
+}
+
+export async function getByInvoice(invoiceId) {
+  for (const trade of trades.values()) {
+    if (String(trade.invoice_id) === String(invoiceId)) return clone(trade);
+  }
+  return null;
+}
+
+export async function updateTrade(id, changes) {
+  const trade = trades.get(Number(id));
+  if (!trade) return null;
+  Object.assign(trade, changes, { updated_at: new Date() });
+  return clone(trade);
+}
+
+export async function closeDb() {
+  trades.clear();
+}
